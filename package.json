@@ -31,7 +31,7 @@
     "react-dom": "^16.14.0",
     "react-scripts": "5.0.0",
     "redis": "^3.1.2",
-    "validator": "^9.4.1",
+    "validator": "^13.7.0",
     "webpack-sources": "^1.4.3"
   },
   "scripts": {
