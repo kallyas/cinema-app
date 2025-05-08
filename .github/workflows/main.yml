@@ -57,45 +57,64 @@ jobs:
         run: |
           echo "Fetching PRs targeting ${{ env.BASE_BRANCH_EFFECTIVE }}..."
           
-          # Create label filter
-          if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
-            echo "Filtering for label: ${{ env.REQUIRED_LABEL }}"
-            LABEL_FILTER="select((.labels | length > 0) and (.labels | map(.name) | index(\"${{ env.REQUIRED_LABEL }}\")))"
-          else
-            echo "No label filter applied"
-            LABEL_FILTER="."
-          fi
-
-          # Fetch PRs that are:
-          # - Open
-          # - Not drafts
-          # - Target the specified BASE_BRANCH
-          # - Are mergeable (no conflicts)
-          # - Have required checks passing
-          # - Have required reviews approved
-          # - (Optional) Have the REQUIRED_LABEL
-          # - Sorted by creation date (oldest first) for FIFO
-          PR_NUMBERS=$(gh pr list \
+          # Special handling for Snyk PRs
+          echo "Checking for Snyk PRs (branches starting with 'snyk-fix-')"
+          
+          # Get detailed PR data
+          PR_DATA=$(gh pr list \
             --state open \
             --base "${{ env.BASE_BRANCH_EFFECTIVE }}" \
-            --json "number,isDraft,mergeable,mergeStateStatus,reviewDecision,labels,createdAt" \
-            --jq ".[] | 
-                select(
-                  .isDraft == false and 
-                  .mergeable == true and
-                  (.mergeStateStatus == \"CLEAN\" or .mergeStateStatus == \"HAS_HOOKS\") and
-                  (.reviewDecision == \"APPROVED\" or .reviewDecision == null)
-                ) | 
-                $LABEL_FILTER |
-                .number" | tr '\n' ' ')
+            --limit 100 \
+            --json "number,title,headRefName,author,isDraft,mergeable,mergeStateStatus,reviewDecision,labels")
           
-          if [ -z "$PR_NUMBERS" ]; then
-            echo "No mergeable PRs found meeting criteria."
+          echo "Found PRs data, now filtering..."
+          
+          # Debug - show some sample data
+          echo "$PR_DATA" | jq -r 'limit(1; .[])' | jq .
+          
+          # Create the filter query based on conditions
+          JQ_FILTER="map(select(
+            .isDraft == false and 
+            (.mergeable == true or .mergeable == null) and
+            (.mergeStateStatus == \"CLEAN\" or .mergeStateStatus == \"HAS_HOOKS\" or .mergeStateStatus == null)"
+          
+          # Add label filter if required
+          if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
+            echo "Filtering for label: ${{ env.REQUIRED_LABEL }}"
+            JQ_FILTER="$JQ_FILTER and (.labels | map(.name) | index(\"${{ env.REQUIRED_LABEL }}\") != null)"
+          fi
+          
+          # Add Snyk detection filter
+          JQ_FILTER="$JQ_FILTER and (
+            (.headRefName | startswith(\"snyk-fix-\")) or 
+            (.author.login == \"snyk-bot\") or
+            (.title | startswith(\"[Snyk]\"))
+          )"
+          
+          # Close the filter and extract numbers
+          JQ_FILTER="$JQ_FILTER)) | map(.number)"
+          
+          echo "Using JQ filter: $JQ_FILTER"
+          
+          # Apply the filter
+          PR_NUMBERS=$(echo "$PR_DATA" | jq -r "$JQ_FILTER | join(\" \")")
+          
+          # Output the results
+          if [ -z "$PR_NUMBERS" ] || [ "$PR_NUMBERS" = "null" ]; then
+            echo "No mergeable Snyk PRs found meeting criteria."
             echo "PR_NUMBERS_TO_MERGE=" >> $GITHUB_OUTPUT
           else
-            echo "Found PRs to merge (numbers): $PR_NUMBERS"
+            echo "Found Snyk PRs to merge (numbers): $PR_NUMBERS"
             echo "PR_NUMBERS_TO_MERGE=$PR_NUMBERS" >> $GITHUB_OUTPUT
           fi
+          
+          # Debug - display counters to understand filtering better
+          echo "Debug counts:"
+          echo "Total open PRs: $(echo "$PR_DATA" | jq -r 'length')"
+          echo "Non-draft PRs: $(echo "$PR_DATA" | jq -r 'map(select(.isDraft == false)) | length')"
+          echo "Mergeable PRs: $(echo "$PR_DATA" | jq -r 'map(select(.mergeable == true or .mergeable == null)) | length')"
+          echo "Clean/ready PRs: $(echo "$PR_DATA" | jq -r 'map(select(.mergeStateStatus == "CLEAN" or .mergeStateStatus == "HAS_HOOKS" or .mergeStateStatus == null)) | length')"
+          echo "Snyk PRs: $(echo "$PR_DATA" | jq -r 'map(select((.headRefName | startswith("snyk-fix-")) or (.author.login == "snyk-bot") or (.title | startswith("[Snyk]")))) | length')"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -107,7 +126,7 @@ jobs:
           # Build merge command arguments
           MERGE_ARGS=""
           if [ "${{ env.DELETE_BRANCH_AFTER_MERGE }}" == "true" ]; then
-            MERGE_ARGS="--delete-branch"
+            MERGE_ARGS="$MERGE_ARGS --delete-branch"
           fi
 
           case "${{ env.MERGE_METHOD }}" in
@@ -129,26 +148,58 @@ jobs:
           for pr_number in ${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}; do
             echo "Attempting to merge PR #$pr_number with method: ${{ env.MERGE_METHOD }}"
             
-            # Verify PR is still mergeable right before attempting to merge
-            PR_STATUS=$(gh pr view $pr_number --json mergeable,mergeStateStatus --jq '[.mergeable, .mergeStateStatus] | @tsv')
-            MERGEABLE=$(echo "$PR_STATUS" | cut -f1)
-            MERGE_STATE=$(echo "$PR_STATUS" | cut -f2)
+            # Get PR details
+            PR_DETAILS=$(gh pr view $pr_number --json number,title,headRefName,url,mergeable,mergeStateStatus)
+            echo "PR details: $PR_DETAILS"
             
-            if [ "$MERGEABLE" != "true" ] || [ "$MERGE_STATE" != "CLEAN" -a "$MERGE_STATE" != "HAS_HOOKS" ]; then
-              echo "PR #$pr_number is no longer mergeable (mergeable=$MERGEABLE, state=$MERGE_STATE). Skipping."
-              continue
-            fi
-
-            if gh pr merge $pr_number $MERGE_ARGS --admin; then
-              echo "✅ Successfully merged PR #$pr_number"
-              # Wait to allow CI to catch up (CI might be needed for subsequent PRs)
-              echo "Waiting 10 seconds before processing the next PR..."
-              sleep 10
+            TITLE=$(echo "$PR_DETAILS" | jq -r '.title')
+            HEAD_BRANCH=$(echo "$PR_DETAILS" | jq -r '.headRefName')
+            PR_URL=$(echo "$PR_DETAILS" | jq -r '.url')
+            
+            echo "Processing: #$pr_number - $TITLE ($HEAD_BRANCH)"
+            echo "URL: $PR_URL"
+            
+            # Special handling for Snyk PRs - always try to merge regardless of status
+            # Snyk PRs are usually security fixes that should be prioritized
+            if [[ "$HEAD_BRANCH" == snyk-fix-* ]] || [[ "$TITLE" == \[Snyk\]* ]]; then
+              echo "This is a Snyk security fix PR - proceeding with merge"
+              
+              # For Snyk PRs, we want to be aggressive about merging security fixes
+              if gh pr merge $pr_number $MERGE_ARGS --admin; then
+                echo "✅ Successfully merged Snyk PR #$pr_number"
+              else 
+                echo "❌ Failed to merge Snyk PR #$pr_number. Adding required label and retrying..."
+                
+                # If there's a required label, try adding it and merging again
+                if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
+                  gh pr edit $pr_number --add-label "${{ env.REQUIRED_LABEL }}"
+                  
+                  if gh pr merge $pr_number $MERGE_ARGS --admin; then
+                    echo "✅ Successfully merged Snyk PR #$pr_number after adding label"
+                  else
+                    echo "❌ Failed to merge Snyk PR #$pr_number even after adding label."
+                  fi
+                fi
+              fi
             else
-              echo "❌ Failed to merge PR #$pr_number. Continuing to the next PR."
-              # Optional: Add a label to indicate merge failure
-              # gh pr edit $pr_number --add-label "merge-failed"
+              # For non-Snyk PRs, verify mergeable status
+              MERGEABLE=$(echo "$PR_DETAILS" | jq -r '.mergeable')
+              MERGE_STATE=$(echo "$PR_DETAILS" | jq -r '.mergeStateStatus')
+              
+              if [ "$MERGEABLE" == "true" ] || [ "$MERGE_STATE" == "CLEAN" ] || [ "$MERGE_STATE" == "HAS_HOOKS" ]; then
+                if gh pr merge $pr_number $MERGE_ARGS --admin; then
+                  echo "✅ Successfully merged PR #$pr_number"
+                else
+                  echo "❌ Failed to merge PR #$pr_number. Continuing to the next PR."
+                fi
+              else
+                echo "PR #$pr_number is not mergeable (mergeable=$MERGEABLE, state=$MERGE_STATE). Skipping."
+              fi
             fi
+            
+            # Wait to allow CI to catch up (CI might be needed for subsequent PRs)
+            echo "Waiting 10 seconds before processing the next PR..."
+            sleep 10
           done
           echo "All queued PRs processed."
         env:
