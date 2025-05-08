@@ -68,32 +68,36 @@ jobs:
             --json "number,title,headRefName,author,isDraft,mergeable,mergeStateStatus,reviewDecision,labels")
           
           echo "Example PR data:"
-          echo "$PR_DATA" | jq -r 'limit(1; .[])' | jq .
+          echo "$PR_DATA" | jq '.[0]'
           
-          # Create the filter query based on conditions
-          # Note: Example shows mergeable is "UNKNOWN" as string, not boolean
-          JQ_FILTER="map(select(
-            .isDraft == false"
+          # Create the filter query based on conditions - more carefully constructed
+          FILTER_SCRIPT='
+            .[] | 
+            select(
+              .isDraft == false
+              and (.labels | length > 0)
+          '
           
           # Add label filter if required
           if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
             echo "Filtering for label: ${{ env.REQUIRED_LABEL }}"
-            JQ_FILTER="$JQ_FILTER and (.labels | map(.name) | index(\"${{ env.REQUIRED_LABEL }}\") != null)"
+            FILTER_SCRIPT="${FILTER_SCRIPT} and (
+              .labels | map(.name) | index(\"${{ env.REQUIRED_LABEL }}\")
+            )"
           fi
           
-          # Add Snyk detection filter - detects Snyk security upgrade PRs specifically
-          JQ_FILTER="$JQ_FILTER and (
-            (.title | startswith(\"[Snyk] Security upgrade\")) or
-            (.title | contains(\"[Snyk]\") and .title | contains(\"Security\"))
+          # Add Snyk detection filter
+          FILTER_SCRIPT="${FILTER_SCRIPT} and (
+            (.title | startswith(\"[Snyk] Security upgrade\"))
           )"
           
-          # Close the filter and extract numbers
-          JQ_FILTER="$JQ_FILTER)) | map(.number)"
+          # Close the filter and get the number
+          FILTER_SCRIPT="${FILTER_SCRIPT}) | .number"
           
-          echo "Using JQ filter: $JQ_FILTER"
+          echo "Using JQ filter script: $FILTER_SCRIPT"
           
           # Apply the filter
-          PR_NUMBERS=$(echo "$PR_DATA" | jq -r "$JQ_FILTER | join(\" \")")
+          PR_NUMBERS=$(echo "$PR_DATA" | jq -r "$FILTER_SCRIPT" | tr '\n' ' ')
           
           # Output the results
           if [ -z "$PR_NUMBERS" ] || [ "$PR_NUMBERS" = "null" ]; then
@@ -104,13 +108,14 @@ jobs:
             echo "PR_NUMBERS_TO_MERGE=$PR_NUMBERS" >> $GITHUB_OUTPUT
           fi
           
-          # Debug - display counters to understand filtering better
+          # Simple debugging counters
           echo "Debug counts:"
-          echo "Total open PRs: $(echo "$PR_DATA" | jq -r 'length')"
-          echo "Non-draft PRs: $(echo "$PR_DATA" | jq -r 'map(select(.isDraft == false)) | length')"
-          echo "Snyk security PRs: $(echo "$PR_DATA" | jq -r 'map(select((.title | startswith("[Snyk] Security upgrade")) or (.title | contains("[Snyk]") and .title | contains("Security")))) | length')"
-          echo "PRs with required label: $(echo "$PR_DATA" | jq -r 'map(select(.labels | map(.name) | index("${{ env.REQUIRED_LABEL }}") != null)) | length')"
-          echo "Final filter result count: $(echo "$PR_DATA" | jq -r "$JQ_FILTER | length")"
+          echo "Total open PRs: $(echo "$PR_DATA" | jq 'length')"
+          echo "Non-draft PRs: $(echo "$PR_DATA" | jq 'map(select(.isDraft == false)) | length')"
+          echo "PRs with title '[Snyk] Security upgrade': $(echo "$PR_DATA" | jq 'map(select(.title | startswith("[Snyk] Security upgrade"))) | length')"
+          if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
+            echo "PRs with required label '${{ env.REQUIRED_LABEL }}': $(echo "$PR_DATA" | jq 'map(select(.labels | map(.name) | index("${{ env.REQUIRED_LABEL }}"))) | length')"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
