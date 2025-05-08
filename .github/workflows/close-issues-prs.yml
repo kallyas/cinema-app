@@ -20,72 +20,61 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      - name: Setup GitHub CLI
+      - name: Install GitHub CLI
         run: |
+          type -p curl >/dev/null || sudo apt install curl -y
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
           sudo apt update
           sudo apt install gh -y
       
-      - name: Configure GitHub CLI
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-      
       - name: Close all open issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOSE_MESSAGE: ${{ github.event.inputs.close_message }}
         run: |
-          CLOSE_MESSAGE="${{ github.event.inputs.close_message }}"
           echo "Closing all open issues..."
           
-          # Get all open issues (process in batches to handle pagination)
-          # We'll use the created date to process in batches
-          MAX_BATCH_SIZE=100
-          
-          echo "Fetching and closing all open issues..."
-          while true; do
-            # Get a batch of open issues
-            ISSUES=$(gh issue list --state open --limit $MAX_BATCH_SIZE --json number,title --jq '.[] | [.number, .title] | @tsv')
+          while : ; do
+            # Get a batch of open issues (max 100 at a time)
+            ISSUES=$(gh issue list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv')
             
-            # If no issues left, we're done
+            # If no issues left, exit the loop
             if [ -z "$ISSUES" ]; then
-              echo "No more open issues found."
+              echo "No more open issues to close."
               break
             fi
             
-            # Process this batch
-            echo "$ISSUES" | while IFS=
-\t' read -r NUMBER TITLE; do
+            # Process all issues in this batch
+            echo "$ISSUES" | while IFS=$'\t' read -r NUMBER TITLE; do
               echo "Closing issue #$NUMBER: $TITLE"
-              gh issue close $NUMBER --comment "$CLOSE_MESSAGE"
-              # Small delay to avoid rate limiting
-              sleep 1
+              gh issue close "$NUMBER" --comment "$CLOSE_MESSAGE"
+              sleep 0.5  # Small delay to avoid rate limiting
             done
           done
       
       - name: Close all open pull requests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOSE_MESSAGE: ${{ github.event.inputs.close_message }}
         run: |
-          CLOSE_MESSAGE="${{ github.event.inputs.close_message }}"
           echo "Closing all open pull requests..."
           
-          # Get all open PRs (process in batches to handle pagination)
-          MAX_BATCH_SIZE=100
-          
-          echo "Fetching and closing all open pull requests..."
-          while true; do
-            # Get a batch of open PRs
-            PRS=$(gh pr list --state open --limit $MAX_BATCH_SIZE --json number,title --jq '.[] | [.number, .title] | @tsv')
+          while : ; do
+            # Get a batch of open PRs (max 100 at a time)
+            PRS=$(gh pr list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv')
             
-            # If no PRs left, we're done
+            # If no PRs left, exit the loop
             if [ -z "$PRS" ]; then
-              echo "No more open pull requests found."
+              echo "No more open pull requests to close."
               break
             fi
             
-            # Process this batch
-            echo "$PRS" | while IFS=
-\t' read -r NUMBER TITLE; do
+            # Process all PRs in this batch
+            echo "$PRS" | while IFS=$'\t' read -r NUMBER TITLE; do
               echo "Closing PR #$NUMBER: $TITLE"
-              gh pr close $NUMBER --comment "$CLOSE_MESSAGE"
-              # Small delay to avoid rate limiting
-              sleep 1
+              gh pr close "$NUMBER" --comment "$CLOSE_MESSAGE"
+              sleep 0.5  # Small delay to avoid rate limiting
             done
           done
