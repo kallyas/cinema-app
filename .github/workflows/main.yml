@@ -1,0 +1,154 @@
+name: Sequential PR Automerger
+
+on:
+  workflow_dispatch: # Allows manual triggering
+  schedule:
+    - cron: '*/1 * * * *' # Runs every 1 minute
+
+# Ensures only one instance of this workflow runs at a time for this group.
+# If a run is in progress, new scheduled triggers will be skipped until it completes.
+concurrency:
+  group: ${{ github.workflow }}-merger
+  cancel-in-progress: false # Let the current merging process finish
+
+permissions:
+  contents: write # To merge branches and delete branches
+  pull-requests: write # To merge PRs and interact with them
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    env:
+      # --- CONFIGURATION ---
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Provided by GitHub Actions
+      BASE_BRANCH: 'main' # The branch PRs should target to be considered for merging
+      MERGE_METHOD: 'SQUASH' # MERGE, SQUASH, or REBASE
+      DELETE_BRANCH_AFTER_MERGE: 'true' # 'true' or 'false'
+      # Optional: Only merge PRs with this label. Leave empty to disable.
+      REQUIRED_LABEL: 'automerge' # e.g., 'ready-to-merge' or 'automerge'
+      # --- END CONFIGURATION ---
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Required for gh cli to work properly with branches
+
+      - name: Get Default Branch if BASE_BRANCH is not set (or to verify)
+        if: env.BASE_BRANCH == '' # Or if you want to dynamically fetch it
+        run: |
+          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef.name -q .defaultBranchRef.name)
+          echo "DEFAULT_BRANCH_NAME=${DEFAULT_BRANCH}" >> $GITHUB_ENV
+          echo "Using default branch: $DEFAULT_BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh cli needs token
+
+      - name: Set Base Branch to Use
+        run: |
+          BRANCH_TO_USE="${{ env.BASE_BRANCH }}"
+          if [ -z "$BRANCH_TO_USE" ]; then
+            BRANCH_TO_USE="${{ env.DEFAULT_BRANCH_NAME }}"
+          fi
+          echo "BASE_BRANCH_EFFECTIVE=${BRANCH_TO_USE}" >> $GITHUB_ENV
+          echo "Will process PRs targeting: ${BRANCH_TO_USE}"
+
+      - name: Fetch Mergeable PRs
+        id: get_prs
+        run: |
+          echo "Fetching PRs targeting ${{ env.BASE_BRANCH_EFFECTIVE }}..."
+          
+          LABEL_FILTER_JQ=""
+          if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
+            LABEL_FILTER_JQ='.labels[] | select(.name == "${{ env.REQUIRED_LABEL }}") | any'
+            echo "Filtering for label: ${{ env.REQUIRED_LABEL }}"
+          else
+            LABEL_FILTER_JQ="true" # No label filter, always true
+          fi
+
+          # Fetch PRs that are:
+          # - Open
+          # - Not drafts
+          # - Target the specified BASE_BRANCH
+          # - Are mergeable (no conflicts)
+          # - Status checks are SUCCESS (or null if no checks)
+          # - Review decision is APPROVED (or null if no reviews required)
+          # - (Optional) Have the REQUIRED_LABEL
+          # - Sorted by creation date (oldest first) for FIFO, or use `updatedAt` for most recently updated
+          PR_NUMBERS=$(gh pr list \
+            --state open \
+            --base "${{ env.BASE_BRANCH_EFFECTIVE }}" \
+            --json number,isDraft,mergeable,statusCheckRollup,reviewDecision,labels,createdAt \
+            --jq "map(select(
+                    .isDraft == false and
+                    .mergeable == \"MERGEABLE\" and
+                    (.statusCheckRollup == \"SUCCESS\" or .statusCheckRollup == null) and
+                    (.reviewDecision == \"APPROVED\" or .reviewDecision == null) and
+                    ($LABEL_FILTER_JQ)
+                  )) | sort_by(.createdAt) | map(.number)")
+          
+          echo "PR_NUMBERS_TO_MERGE<<EOF" >> $GITHUB_OUTPUT
+          echo "$PR_NUMBERS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          if [ "$PR_NUMBERS" == "[]" ] || [ -z "$PR_NUMBERS" ]; then
+            echo "No mergeable PRs found meeting criteria."
+          else
+            echo "Found PRs to merge (numbers): $PR_NUMBERS"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge PRs Sequentially
+        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE != '[]' && steps.get_prs.outputs.PR_NUMBERS_TO_MERGE != ''
+        run: |
+          echo "Attempting to merge PRs..."
+          PR_LIST=$(echo "${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}" | jq -r '.[]')
+
+          MERGE_ARGS=""
+          if [ "${{ env.DELETE_BRANCH_AFTER_MERGE }}" == "true" ]; then
+            MERGE_ARGS="--delete-branch"
+          fi
+
+          case "${{ env.MERGE_METHOD }}" in
+            SQUASH)
+              MERGE_ARGS="$MERGE_ARGS --squash"
+              ;;
+            REBASE)
+              MERGE_ARGS="$MERGE_ARGS --rebase"
+              ;;
+            MERGE)
+              MERGE_ARGS="$MERGE_ARGS --merge"
+              ;;
+            *)
+              echo "Invalid MERGE_METHOD: ${{ env.MERGE_METHOD }}. Using default (merge commit)."
+              MERGE_ARGS="$MERGE_ARGS --merge"
+              ;;
+          esac
+          
+          for pr_number in $PR_LIST; do
+            echo "Attempting to merge PR #$pr_number with method: ${{ env.MERGE_METHOD }}"
+            
+            # Re-check mergeability right before merging as state might have changed
+            MERGE_STATUS=$(gh pr view $pr_number --json mergeable -q .mergeable)
+            if [ "$MERGE_STATUS" != "MERGEABLE" ]; then
+                echo "PR #$pr_number is no longer mergeable (status: $MERGE_STATUS). Skipping."
+                continue
+            fi
+
+            if gh pr merge "$pr_number" $MERGE_ARGS; then
+              echo "Successfully merged PR #$pr_number"
+            else
+              echo "Failed to merge PR #$pr_number. It might have conflicts or failed checks after a previous merge. Will skip."
+              # Optionally, you could add a label like 'automerge-failed' here
+              # gh pr edit $pr_number --add-label "automerge-failed"
+            fi
+            echo "Waiting 10 seconds before next PR to allow GitHub to process..."
+            sleep 10 # Small delay
+          done
+          echo "All queued PRs processed."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: No PRs to merge
+        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE == '[]' || steps.get_prs.outputs.PR_NUMBERS_TO_MERGE == ''
+        run: echo "No PRs met the criteria for merging at this time."
