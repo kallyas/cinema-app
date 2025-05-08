@@ -143,31 +143,31 @@ jobs:
               echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
             fi
             
-            # If still not merged, try with auto flag
+            # If still not merged, try with auto flag instead of admin
             if [ "$MERGED" = "false" ]; then
               echo "  - Attempt 2: Auto-merge with conflict resolution" >> "$DETAILS_FILE"
-              if gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto; then
+              if gh pr merge $PR_NUMBER $MERGE_ARGS --auto; then
                 echo "✅ PR #$PR_NUMBER merged successfully with auto-merge"
                 echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Auto-resolved conflicts" >> success_bucket.txt
                 MERGED=true
                 echo "    - ✅ Success" >> "$DETAILS_FILE"
               else
-                ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto 2>&1 || true)
+                ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --auto 2>&1 || true)
                 echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
               fi
             fi
             
-            # If still not merged, try adding label
+            # If still not merged, try adding label and use admin flag
             if [ "$MERGED" = "false" ] && [ -n "${{ env.REQUIRED_LABEL }}" ]; then
               echo "  - Attempt 3: Adding '${{ env.REQUIRED_LABEL }}' label" >> "$DETAILS_FILE"
               gh pr edit $PR_NUMBER --add-label "${{ env.REQUIRED_LABEL }}"
-              if gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto; then
+              if gh pr merge $PR_NUMBER $MERGE_ARGS --admin; then
                 echo "✅ PR #$PR_NUMBER merged successfully after adding label"
                 echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Added label and merged" >> success_bucket.txt
                 MERGED=true
                 echo "    - ✅ Success" >> "$DETAILS_FILE"
               else
-                ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto 2>&1 || true)
+                ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --admin 2>&1 || true)
                 echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
               fi
             fi
@@ -175,13 +175,13 @@ jobs:
             # If still not merged, try merge commit as last resort
             if [ "$MERGED" = "false" ] && [ "${{ env.MERGE_METHOD }}" != "MERGE" ]; then
               echo "  - Attempt 4: Fallback to merge commit method" >> "$DETAILS_FILE"
-              if gh pr merge $PR_NUMBER --merge --admin --auto; then
+              if gh pr merge $PR_NUMBER --merge --admin; then
                 echo "✅ PR #$PR_NUMBER merged successfully with merge commit"
                 echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Used merge commit method" >> success_bucket.txt
                 MERGED=true
                 echo "    - ✅ Success" >> "$DETAILS_FILE"
               else
-                ERROR=$(gh pr merge $PR_NUMBER --merge --admin --auto 2>&1 || true)
+                ERROR=$(gh pr merge $PR_NUMBER --merge --admin 2>&1 || true)
                 echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
                 
                 # Failed all attempts, add to error bucket
