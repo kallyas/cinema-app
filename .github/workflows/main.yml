@@ -3,7 +3,7 @@ name: Sequential PR Automerger
 on:
   workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '*/1 * * * *' # Runs every 1 minute
+    - cron: '*/10 * * * *' # Runs every 10 minutes (reduced from every 1 minute to avoid rate limiting)
 
 # Ensures only one instance of this workflow runs at a time for this group.
 # If a run is in progress, new scheduled triggers will be skipped until it completes.
@@ -37,7 +37,7 @@ jobs:
       - name: Get Default Branch if BASE_BRANCH is not set (or to verify)
         if: env.BASE_BRANCH == '' # Or if you want to dynamically fetch it
         run: |
-          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef.name -q .defaultBranchRef.name)
+          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
           echo "DEFAULT_BRANCH_NAME=${DEFAULT_BRANCH}" >> $GITHUB_ENV
           echo "Using default branch: $DEFAULT_BRANCH"
         env:
@@ -57,12 +57,13 @@ jobs:
         run: |
           echo "Fetching PRs targeting ${{ env.BASE_BRANCH_EFFECTIVE }}..."
           
-          LABEL_FILTER_JQ=""
+          # Create label filter
           if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
-            LABEL_FILTER_JQ='.labels[] | select(.name == "${{ env.REQUIRED_LABEL }}") | any'
             echo "Filtering for label: ${{ env.REQUIRED_LABEL }}"
+            LABEL_FILTER="select((.labels | length > 0) and (.labels | map(.name) | index(\"${{ env.REQUIRED_LABEL }}\")))"
           else
-            LABEL_FILTER_JQ="true" # No label filter, always true
+            echo "No label filter applied"
+            LABEL_FILTER="."
           fi
 
           # Fetch PRs that are:
@@ -70,40 +71,40 @@ jobs:
           # - Not drafts
           # - Target the specified BASE_BRANCH
           # - Are mergeable (no conflicts)
-          # - Status checks are SUCCESS (or null if no checks)
-          # - Review decision is APPROVED (or null if no reviews required)
+          # - Have required checks passing
+          # - Have required reviews approved
           # - (Optional) Have the REQUIRED_LABEL
-          # - Sorted by creation date (oldest first) for FIFO, or use `updatedAt` for most recently updated
+          # - Sorted by creation date (oldest first) for FIFO
           PR_NUMBERS=$(gh pr list \
             --state open \
             --base "${{ env.BASE_BRANCH_EFFECTIVE }}" \
-            --json number,isDraft,mergeable,statusCheckRollup,reviewDecision,labels,createdAt \
-            --jq "map(select(
-                    .isDraft == false and
-                    .mergeable == \"MERGEABLE\" and
-                    (.statusCheckRollup == \"SUCCESS\" or .statusCheckRollup == null) and
-                    (.reviewDecision == \"APPROVED\" or .reviewDecision == null) and
-                    ($LABEL_FILTER_JQ)
-                  )) | sort_by(.createdAt) | map(.number)")
+            --json "number,isDraft,mergeable,mergeStateStatus,reviewDecision,labels,createdAt" \
+            --jq ".[] | 
+                select(
+                  .isDraft == false and 
+                  .mergeable == true and
+                  (.mergeStateStatus == \"CLEAN\" or .mergeStateStatus == \"HAS_HOOKS\") and
+                  (.reviewDecision == \"APPROVED\" or .reviewDecision == null)
+                ) | 
+                $LABEL_FILTER |
+                .number" | tr '\n' ' ')
           
-          echo "PR_NUMBERS_TO_MERGE<<EOF" >> $GITHUB_OUTPUT
-          echo "$PR_NUMBERS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          if [ "$PR_NUMBERS" == "[]" ] || [ -z "$PR_NUMBERS" ]; then
+          if [ -z "$PR_NUMBERS" ]; then
             echo "No mergeable PRs found meeting criteria."
+            echo "PR_NUMBERS_TO_MERGE=" >> $GITHUB_OUTPUT
           else
             echo "Found PRs to merge (numbers): $PR_NUMBERS"
+            echo "PR_NUMBERS_TO_MERGE=$PR_NUMBERS" >> $GITHUB_OUTPUT
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Merge PRs Sequentially
-        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE != '[]' && steps.get_prs.outputs.PR_NUMBERS_TO_MERGE != ''
+        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE != ''
         run: |
-          echo "Attempting to merge PRs..."
-          PR_LIST=$(echo "${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}" | jq -r '.[]')
-
+          echo "Attempting to merge PRs: ${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}"
+          
+          # Build merge command arguments
           MERGE_ARGS=""
           if [ "${{ env.DELETE_BRANCH_AFTER_MERGE }}" == "true" ]; then
             MERGE_ARGS="--delete-branch"
@@ -125,30 +126,34 @@ jobs:
               ;;
           esac
           
-          for pr_number in $PR_LIST; do
+          for pr_number in ${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}; do
             echo "Attempting to merge PR #$pr_number with method: ${{ env.MERGE_METHOD }}"
             
-            # Re-check mergeability right before merging as state might have changed
-            MERGE_STATUS=$(gh pr view $pr_number --json mergeable -q .mergeable)
-            if [ "$MERGE_STATUS" != "MERGEABLE" ]; then
-                echo "PR #$pr_number is no longer mergeable (status: $MERGE_STATUS). Skipping."
-                continue
+            # Verify PR is still mergeable right before attempting to merge
+            PR_STATUS=$(gh pr view $pr_number --json mergeable,mergeStateStatus --jq '[.mergeable, .mergeStateStatus] | @tsv')
+            MERGEABLE=$(echo "$PR_STATUS" | cut -f1)
+            MERGE_STATE=$(echo "$PR_STATUS" | cut -f2)
+            
+            if [ "$MERGEABLE" != "true" ] || [ "$MERGE_STATE" != "CLEAN" -a "$MERGE_STATE" != "HAS_HOOKS" ]; then
+              echo "PR #$pr_number is no longer mergeable (mergeable=$MERGEABLE, state=$MERGE_STATE). Skipping."
+              continue
             fi
 
-            if gh pr merge "$pr_number" $MERGE_ARGS; then
-              echo "Successfully merged PR #$pr_number"
+            if gh pr merge $pr_number $MERGE_ARGS --admin; then
+              echo "✅ Successfully merged PR #$pr_number"
+              # Wait to allow CI to catch up (CI might be needed for subsequent PRs)
+              echo "Waiting 10 seconds before processing the next PR..."
+              sleep 10
             else
-              echo "Failed to merge PR #$pr_number. It might have conflicts or failed checks after a previous merge. Will skip."
-              # Optionally, you could add a label like 'automerge-failed' here
-              # gh pr edit $pr_number --add-label "automerge-failed"
+              echo "❌ Failed to merge PR #$pr_number. Continuing to the next PR."
+              # Optional: Add a label to indicate merge failure
+              # gh pr edit $pr_number --add-label "merge-failed"
             fi
-            echo "Waiting 10 seconds before next PR to allow GitHub to process..."
-            sleep 10 # Small delay
           done
           echo "All queued PRs processed."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: No PRs to merge
-        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE == '[]' || steps.get_prs.outputs.PR_NUMBERS_TO_MERGE == ''
+        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE == ''
         run: echo "No PRs met the criteria for merging at this time."
