@@ -36,22 +36,29 @@ jobs:
           CLOSE_MESSAGE="${{ github.event.inputs.close_message }}"
           echo "Closing all open issues..."
           
-          # Get all open issues (paginate through all results)
-          PAGE=1
+          # Get all open issues (process in batches to handle pagination)
+          # We'll use the created date to process in batches
+          MAX_BATCH_SIZE=100
+          
+          echo "Fetching and closing all open issues..."
           while true; do
-            ISSUES=$(gh issue list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv' --page $PAGE)
+            # Get a batch of open issues
+            ISSUES=$(gh issue list --state open --limit $MAX_BATCH_SIZE --json number,title --jq '.[] | [.number, .title] | @tsv')
+            
+            # If no issues left, we're done
             if [ -z "$ISSUES" ]; then
+              echo "No more open issues found."
               break
             fi
             
-            echo "$ISSUES" | while IFS=$'\t' read -r NUMBER TITLE; do
+            # Process this batch
+            echo "$ISSUES" | while IFS=
+\t' read -r NUMBER TITLE; do
               echo "Closing issue #$NUMBER: $TITLE"
               gh issue close $NUMBER --comment "$CLOSE_MESSAGE"
               # Small delay to avoid rate limiting
               sleep 1
             done
-            
-            PAGE=$((PAGE+1))
           done
       
       - name: Close all open pull requests
@@ -59,20 +66,26 @@ jobs:
           CLOSE_MESSAGE="${{ github.event.inputs.close_message }}"
           echo "Closing all open pull requests..."
           
-          # Get all open PRs (paginate through all results)
-          PAGE=1
+          # Get all open PRs (process in batches to handle pagination)
+          MAX_BATCH_SIZE=100
+          
+          echo "Fetching and closing all open pull requests..."
           while true; do
-            PRS=$(gh pr list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv' --page $PAGE)
+            # Get a batch of open PRs
+            PRS=$(gh pr list --state open --limit $MAX_BATCH_SIZE --json number,title --jq '.[] | [.number, .title] | @tsv')
+            
+            # If no PRs left, we're done
             if [ -z "$PRS" ]; then
+              echo "No more open pull requests found."
               break
             fi
             
-            echo "$PRS" | while IFS=$'\t' read -r NUMBER TITLE; do
+            # Process this batch
+            echo "$PRS" | while IFS=
+\t' read -r NUMBER TITLE; do
               echo "Closing PR #$NUMBER: $TITLE"
               gh pr close $NUMBER --comment "$CLOSE_MESSAGE"
               # Small delay to avoid rate limiting
               sleep 1
             done
-            
-            PAGE=$((PAGE+1))
           done
