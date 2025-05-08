@@ -21,7 +21,7 @@ jobs:
     env:
       # --- CONFIGURATION ---
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Provided by GitHub Actions
-      BASE_BRANCH: 'main' # The branch PRs should target to be considered for merging
+      BASE_BRANCH: 'master' # The branch PRs should target to be considered for merging
       MERGE_METHOD: 'SQUASH' # MERGE, SQUASH, or REBASE
       DELETE_BRANCH_AFTER_MERGE: 'true' # 'true' or 'false'
       # Optional: Only merge PRs with this label. Leave empty to disable.
