@@ -1,0 +1,74 @@
+name: Close All Issues and PRs
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "CONFIRM" to proceed with closing all issues and PRs'
+        required: true
+        default: ''
+      close_message:
+        description: 'Message to include when closing issues and PRs'
+        required: false
+        default: 'Closing as part of repository cleanup.'
+
+jobs:
+  close-all:
+    if: ${{ github.event.inputs.confirm == 'CONFIRM' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup GitHub CLI
+        uses: cli/setup-gh@v1
+      
+      - name: Configure GitHub CLI
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+      
+      - name: Close all open issues
+        run: |
+          CLOSE_MESSAGE="${{ github.event.inputs.close_message }}"
+          echo "Closing all open issues..."
+          
+          # Get all open issues (paginate through all results)
+          PAGE=1
+          while true; do
+            ISSUES=$(gh issue list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv' --page $PAGE)
+            if [ -z "$ISSUES" ]; then
+              break
+            fi
+            
+            echo "$ISSUES" | while IFS=$'\t' read -r NUMBER TITLE; do
+              echo "Closing issue #$NUMBER: $TITLE"
+              gh issue close $NUMBER --comment "$CLOSE_MESSAGE"
+              # Small delay to avoid rate limiting
+              sleep 1
+            done
+            
+            PAGE=$((PAGE+1))
+          done
+      
+      - name: Close all open pull requests
+        run: |
+          CLOSE_MESSAGE="${{ github.event.inputs.close_message }}"
+          echo "Closing all open pull requests..."
+          
+          # Get all open PRs (paginate through all results)
+          PAGE=1
+          while true; do
+            PRS=$(gh pr list --state open --limit 100 --json number,title --jq '.[] | [.number, .title] | @tsv' --page $PAGE)
+            if [ -z "$PRS" ]; then
+              break
+            fi
+            
+            echo "$PRS" | while IFS=$'\t' read -r NUMBER TITLE; do
+              echo "Closing PR #$NUMBER: $TITLE"
+              gh pr close $NUMBER --comment "$CLOSE_MESSAGE"
+              # Small delay to avoid rate limiting
+              sleep 1
+            done
+            
+            PAGE=$((PAGE+1))
+          done
