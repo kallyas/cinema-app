@@ -1,12 +1,11 @@
-name: Sequential PR Automerger
+name: Resilient Snyk PR Automerger
 
 on:
   workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '*/10 * * * *' # Runs every 10 minutes (reduced from every 1 minute to avoid rate limiting)
+    - cron: '*/15 * * * *' # Runs every 15 minutes
 
-# Ensures only one instance of this workflow runs at a time for this group.
-# If a run is in progress, new scheduled triggers will be skipped until it completes.
+# Ensures only one instance runs at a time
 concurrency:
   group: ${{ github.workflow }}-merger
   cancel-in-progress: false # Let the current merging process finish
@@ -14,6 +13,7 @@ concurrency:
 permissions:
   contents: write # To merge branches and delete branches
   pull-requests: write # To merge PRs and interact with them
+  issues: write # To create issues with reports
 
 jobs:
   automerge:
@@ -21,10 +21,9 @@ jobs:
     env:
       # --- CONFIGURATION ---
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Provided by GitHub Actions
-      BASE_BRANCH: 'master' # The branch PRs should target to be considered for merging
+      BASE_BRANCH: 'master' # Target branch
       MERGE_METHOD: 'SQUASH' # MERGE, SQUASH, or REBASE
       DELETE_BRANCH_AFTER_MERGE: 'true' # 'true' or 'false'
-      # Optional: Only merge PRs with this label. Leave empty to disable.
       REQUIRED_LABEL: 'automerge' # e.g., 'ready-to-merge' or 'automerge'
       # --- END CONFIGURATION ---
 
@@ -32,104 +31,54 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Required for gh cli to work properly with branches
+          fetch-depth: 0 # Required for gh cli
 
-      - name: Get Default Branch if BASE_BRANCH is not set (or to verify)
-        if: env.BASE_BRANCH == '' # Or if you want to dynamically fetch it
+      - name: Set Up Temporary Files
         run: |
-          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
-          echo "DEFAULT_BRANCH_NAME=${DEFAULT_BRANCH}" >> $GITHUB_ENV
-          echo "Using default branch: $DEFAULT_BRANCH"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh cli needs token
+          # Create temporary files to store our "buckets"
+          touch success_bucket.txt
+          touch error_bucket.txt
+          touch pr_list.txt
+          mkdir -p temp_files/
 
-      - name: Set Base Branch to Use
+      - name: Find Snyk Security PRs
+        id: find_prs
         run: |
-          BRANCH_TO_USE="${{ env.BASE_BRANCH }}"
-          if [ -z "$BRANCH_TO_USE" ]; then
-            BRANCH_TO_USE="${{ env.DEFAULT_BRANCH_NAME }}"
-          fi
-          echo "BASE_BRANCH_EFFECTIVE=${BRANCH_TO_USE}" >> $GITHUB_ENV
-          echo "Will process PRs targeting: ${BRANCH_TO_USE}"
-
-      - name: Fetch Mergeable PRs
-        id: get_prs
-        run: |
-          echo "Fetching PRs targeting ${{ env.BASE_BRANCH_EFFECTIVE }}..."
+          echo "Finding Snyk security upgrade PRs..."
           
-          # Special handling for Snyk PRs
-          echo "Checking for Snyk PRs with titles like '[Snyk] Security upgrade ...'"
-          
-          # Get detailed PR data
-          PR_DATA=$(gh pr list \
+          # Simple approach: directly get PR numbers that match our criteria
+          gh pr list \
             --state open \
-            --base "${{ env.BASE_BRANCH_EFFECTIVE }}" \
-            --limit 100 \
-            --json "number,title,headRefName,author,isDraft,mergeable,mergeStateStatus,reviewDecision,labels")
+            --base "${{ env.BASE_BRANCH }}" \
+            --json number,title,labels \
+            --jq '.[] | select(.title | startswith("[Snyk] Security upgrade")) | .number' > pr_list.txt
           
-          echo "Example PR data:"
-          echo "$PR_DATA" | jq '.[0]'
-          
-          # Create the filter query based on conditions - more carefully constructed
-          FILTER_SCRIPT='
-            .[] | 
-            select(
-              .isDraft == false
-              and (.labels | length > 0)
-          '
-          
-          # Add label filter if required
-          if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
-            echo "Filtering for label: ${{ env.REQUIRED_LABEL }}"
-            FILTER_SCRIPT="${FILTER_SCRIPT} and (
-              .labels | map(.name) | index(\"${{ env.REQUIRED_LABEL }}\")
-            )"
+          # Check if we found any PRs
+          if [ ! -s pr_list.txt ]; then
+            echo "No Snyk security PRs found."
+            echo "FOUND_PRS=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
           
-          # Add Snyk detection filter
-          FILTER_SCRIPT="${FILTER_SCRIPT} and (
-            (.title | startswith(\"[Snyk] Security upgrade\"))
-          )"
+          # Count and show the PRs
+          PR_COUNT=$(wc -l < pr_list.txt)
+          echo "Found $PR_COUNT Snyk security PRs to process"
+          echo "FOUND_PRS=true" >> $GITHUB_OUTPUT
+          echo "PR_COUNT=$PR_COUNT" >> $GITHUB_OUTPUT
           
-          # Close the filter and get the number
-          FILTER_SCRIPT="${FILTER_SCRIPT}) | .number"
-          
-          echo "Using JQ filter script: $FILTER_SCRIPT"
-          
-          # Apply the filter
-          PR_NUMBERS=$(echo "$PR_DATA" | jq -r "$FILTER_SCRIPT" | tr '\n' ' ')
-          
-          # Output the results
-          if [ -z "$PR_NUMBERS" ] || [ "$PR_NUMBERS" = "null" ]; then
-            echo "No Snyk security upgrade PRs found."
-            echo "PR_NUMBERS_TO_MERGE=" >> $GITHUB_OUTPUT
-          else
-            echo "Found Snyk security upgrade PRs to merge (numbers): $PR_NUMBERS"
-            echo "PR_NUMBERS_TO_MERGE=$PR_NUMBERS" >> $GITHUB_OUTPUT
-          fi
-          
-          # Simple debugging counters
-          echo "Debug counts:"
-          echo "Total open PRs: $(echo "$PR_DATA" | jq 'length')"
-          echo "Non-draft PRs: $(echo "$PR_DATA" | jq 'map(select(.isDraft == false)) | length')"
-          echo "PRs with title '[Snyk] Security upgrade': $(echo "$PR_DATA" | jq 'map(select(.title | startswith("[Snyk] Security upgrade"))) | length')"
-          if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
-            echo "PRs with required label '${{ env.REQUIRED_LABEL }}': $(echo "$PR_DATA" | jq 'map(select(.labels | map(.name) | index("${{ env.REQUIRED_LABEL }}"))) | length')"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # List the PRs for logging
+          echo "PR numbers to process:"
+          cat pr_list.txt
 
-      - name: Merge PRs Sequentially
-        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE != ''
+      - name: Process PRs (Bucket Approach)
+        if: steps.find_prs.outputs.FOUND_PRS == 'true'
         run: |
-          echo "Attempting to merge PRs: ${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}"
-          
-          # Build merge command arguments
+          # Set up merge arguments
           MERGE_ARGS=""
           if [ "${{ env.DELETE_BRANCH_AFTER_MERGE }}" == "true" ]; then
             MERGE_ARGS="$MERGE_ARGS --delete-branch"
           fi
-
+          
           case "${{ env.MERGE_METHOD }}" in
             SQUASH)
               MERGE_ARGS="$MERGE_ARGS --squash"
@@ -141,125 +90,220 @@ jobs:
               MERGE_ARGS="$MERGE_ARGS --merge"
               ;;
             *)
-              echo "Invalid MERGE_METHOD: ${{ env.MERGE_METHOD }}. Using default (merge commit)."
+              echo "Using default merge method (merge commit)"
               MERGE_ARGS="$MERGE_ARGS --merge"
               ;;
           esac
           
-          # Create a file to track merged and failed PRs
-          echo "# Snyk Security Upgrade Merge Report $(date)" > merge_report.md
-          echo "" >> merge_report.md
-          echo "| PR # | Status | Security Upgrade | Reason |" >> merge_report.md
-          echo "|------|--------|-----------------|--------|" >> merge_report.md
-          
-          for pr_number in ${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}; do
-            # Get PR details
-            PR_DETAILS=$(gh pr view $pr_number --json number,title,headRefName,url)
+          # Process each PR without stopping on errors
+          while read -r PR_NUMBER; do
+            echo "Processing PR #$PR_NUMBER..."
             
-            TITLE=$(echo "$PR_DETAILS" | jq -r '.title')
-            HEAD_BRANCH=$(echo "$PR_DETAILS" | jq -r '.headRefName')
-            PR_URL=$(echo "$PR_DETAILS" | jq -r '.url')
+            # Get PR details and save to temp file
+            PR_DATA_FILE="temp_files/pr_${PR_NUMBER}.json"
+            gh pr view $PR_NUMBER --json number,title,headRefName,url > "$PR_DATA_FILE"
             
-            # Extract package upgrade info for better reporting
-            if [[ "$TITLE" =~ \[Snyk\]\ Security\ upgrade\ ([a-zA-Z0-9\-_\.\/]+)\ from\ ([0-9\.]+)\ to\ ([0-9\.]+) ]]; then
+            PR_TITLE=$(jq -r '.title' "$PR_DATA_FILE")
+            PR_BRANCH=$(jq -r '.headRefName' "$PR_DATA_FILE")
+            PR_URL=$(jq -r '.url' "$PR_DATA_FILE")
+            
+            # Extract package info if possible
+            if [[ "$PR_TITLE" =~ \[Snyk\]\ Security\ upgrade\ ([a-zA-Z0-9\-_\.\/]+)\ from\ ([0-9\.]+)\ to\ ([0-9\.]+) ]]; then
               PACKAGE="${BASH_REMATCH[1]}"
               FROM_VERSION="${BASH_REMATCH[2]}"
               TO_VERSION="${BASH_REMATCH[3]}"
               UPGRADE_INFO="$PACKAGE $FROM_VERSION → $TO_VERSION"
             else
-              UPGRADE_INFO="$TITLE"
+              UPGRADE_INFO="$PR_TITLE"
             fi
             
-            echo "🔒 Processing security upgrade PR #$pr_number: $UPGRADE_INFO"
-            echo "Branch: $HEAD_BRANCH"
-            echo "URL: $PR_URL"
+            echo "🔒 Security upgrade: $UPGRADE_INFO"
+            echo "Branch: $PR_BRANCH"
             
-            # First attempt: Default merge method
-            echo "1️⃣ Attempt 1: Using ${{ env.MERGE_METHOD }} method..."
-            if gh pr merge $pr_number $MERGE_ARGS --admin; then
-              echo "✅ Successfully merged security PR #$pr_number"
-              echo "| $pr_number | ✅ Success | $UPGRADE_INFO | First attempt |" >> merge_report.md
-              sleep 5
-              continue
+            # Create a details file for this PR
+            DETAILS_FILE="temp_files/details_${PR_NUMBER}.md"
+            echo "## PR #$PR_NUMBER: $PR_TITLE" > "$DETAILS_FILE"
+            echo "- **Branch:** \`$PR_BRANCH\`" >> "$DETAILS_FILE"
+            echo "- **URL:** $PR_URL" >> "$DETAILS_FILE"
+            echo "- **Package:** $UPGRADE_INFO" >> "$DETAILS_FILE"
+            echo "- **Attempts:**" >> "$DETAILS_FILE"
+            
+            # Try different merge approaches - any success will break out
+            MERGED=false
+            
+            # Try method 1: Standard merge
+            echo "  - Attempt 1: Standard merge with ${{ env.MERGE_METHOD }} method" >> "$DETAILS_FILE"
+            if gh pr merge $PR_NUMBER $MERGE_ARGS --admin; then
+              echo "✅ PR #$PR_NUMBER merged successfully with standard merge"
+              echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Standard merge" >> success_bucket.txt
+              MERGED=true
+              echo "    - ✅ Success" >> "$DETAILS_FILE"
+            else
+              ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --admin 2>&1 || true)
+              echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
             fi
             
-            # Second attempt: Try with auto flag for conflict resolution
-            echo "2️⃣ Attempt 2: Adding --auto flag to resolve conflicts..."
-            if gh pr merge $pr_number $MERGE_ARGS --admin --auto; then
-              echo "✅ Successfully auto-resolved conflicts for PR #$pr_number"
-              echo "| $pr_number | ✅ Success | $UPGRADE_INFO | Auto-resolved conflicts |" >> merge_report.md
-              sleep 5
-              continue
-            fi
-            
-            # Third attempt: Make sure required label is present
-            if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
-              echo "3️⃣ Attempt 3: Adding '${{ env.REQUIRED_LABEL }}' label and trying again..."
-              gh pr edit $pr_number --add-label "${{ env.REQUIRED_LABEL }}"
-              if gh pr merge $pr_number $MERGE_ARGS --admin --auto; then
-                echo "✅ Successfully merged PR #$pr_number after adding label"
-                echo "| $pr_number | ✅ Success | $UPGRADE_INFO | Added label |" >> merge_report.md
-                sleep 5
-                continue
+            # If still not merged, try with auto flag
+            if [ "$MERGED" = "false" ]; then
+              echo "  - Attempt 2: Auto-merge with conflict resolution" >> "$DETAILS_FILE"
+              if gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto; then
+                echo "✅ PR #$PR_NUMBER merged successfully with auto-merge"
+                echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Auto-resolved conflicts" >> success_bucket.txt
+                MERGED=true
+                echo "    - ✅ Success" >> "$DETAILS_FILE"
+              else
+                ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto 2>&1 || true)
+                echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
               fi
             fi
             
-            # Fourth attempt: Try different merge method (merge instead of squash or rebase)
-            if [ "${{ env.MERGE_METHOD }}" != "MERGE" ]; then
-              echo "4️⃣ Attempt 4: Switching to merge commit method..."
-              if gh pr merge $pr_number --merge --admin --auto; then
-                echo "✅ Successfully merged PR #$pr_number with merge commit method"
-                echo "| $pr_number | ✅ Success | $UPGRADE_INFO | Used merge commit |" >> merge_report.md
-                sleep 5
-                continue
+            # If still not merged, try adding label
+            if [ "$MERGED" = "false" ] && [ -n "${{ env.REQUIRED_LABEL }}" ]; then
+              echo "  - Attempt 3: Adding '${{ env.REQUIRED_LABEL }}' label" >> "$DETAILS_FILE"
+              gh pr edit $PR_NUMBER --add-label "${{ env.REQUIRED_LABEL }}"
+              if gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto; then
+                echo "✅ PR #$PR_NUMBER merged successfully after adding label"
+                echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Added label and merged" >> success_bucket.txt
+                MERGED=true
+                echo "    - ✅ Success" >> "$DETAILS_FILE"
+              else
+                ERROR=$(gh pr merge $PR_NUMBER $MERGE_ARGS --admin --auto 2>&1 || true)
+                echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
               fi
             fi
             
-            # If all attempts failed, record the failure and error message
-            echo "❌ All merge attempts failed for PR #$pr_number"
+            # If still not merged, try merge commit as last resort
+            if [ "$MERGED" = "false" ] && [ "${{ env.MERGE_METHOD }}" != "MERGE" ]; then
+              echo "  - Attempt 4: Fallback to merge commit method" >> "$DETAILS_FILE"
+              if gh pr merge $PR_NUMBER --merge --admin --auto; then
+                echo "✅ PR #$PR_NUMBER merged successfully with merge commit"
+                echo "$PR_NUMBER | ✅ Success | $UPGRADE_INFO | Used merge commit method" >> success_bucket.txt
+                MERGED=true
+                echo "    - ✅ Success" >> "$DETAILS_FILE"
+              else
+                ERROR=$(gh pr merge $PR_NUMBER --merge --admin --auto 2>&1 || true)
+                echo "    - ❌ Failed: $ERROR" >> "$DETAILS_FILE"
+                
+                # Failed all attempts, add to error bucket
+                echo "$PR_NUMBER | ❌ Failed | $UPGRADE_INFO | All merge attempts failed" >> error_bucket.txt
+                
+                # Add manual resolution instructions
+                echo "" >> "$DETAILS_FILE"
+                echo "### Manual Resolution Required" >> "$DETAILS_FILE"
+                echo "This PR needs manual conflict resolution. Use these commands:" >> "$DETAILS_FILE"
+                echo '```bash' >> "$DETAILS_FILE"
+                echo "gh pr checkout $PR_NUMBER" >> "$DETAILS_FILE"
+                echo "git fetch origin ${{ env.BASE_BRANCH }}" >> "$DETAILS_FILE"
+                echo "git merge origin/${{ env.BASE_BRANCH }}" >> "$DETAILS_FILE"
+                echo "# Resolve conflicts manually, then:" >> "$DETAILS_FILE"
+                echo "git add ." >> "$DETAILS_FILE"
+                echo "git commit -m \"Resolve conflicts in $PR_TITLE\"" >> "$DETAILS_FILE"
+                echo "git push" >> "$DETAILS_FILE"
+                echo '```' >> "$DETAILS_FILE"
+              fi
+            fi
             
-            # Get the specific error message
-            ERROR_OUTPUT=$(gh pr merge $pr_number --admin 2>&1 || true)
-            echo "Error: $ERROR_OUTPUT"
+            # Brief pause before next PR
+            sleep 2
             
-            # Extract branch info for manual resolution instructions
-            BASE_BRANCH="${{ env.BASE_BRANCH_EFFECTIVE }}"
-            
-            echo "| $pr_number | ❌ Failed | $UPGRADE_INFO | See instructions below |" >> merge_report.md
-            echo "" >> merge_report.md
-            echo "### PR #$pr_number: $TITLE" >> merge_report.md
-            echo "**Error:** \`$ERROR_OUTPUT\`" >> merge_report.md
-            echo "" >> merge_report.md
-            echo "To resolve conflicts manually:" >> merge_report.md
-            echo "```bash" >> merge_report.md
-            echo "gh pr checkout $pr_number" >> merge_report.md
-            echo "git fetch origin $BASE_BRANCH" >> merge_report.md
-            echo "git merge origin/$BASE_BRANCH" >> merge_report.md
-            echo "# Resolve conflicts, then:" >> merge_report.md
-            echo "git add ." >> merge_report.md
-            echo "git commit -m \"Resolved conflicts for Snyk PR #$pr_number\"" >> merge_report.md
-            echo "git push" >> merge_report.md
-            echo "```" >> merge_report.md
-            echo "" >> merge_report.md
-            
-            # Wait before moving to next PR
-            sleep 5
-          done
+          done < pr_list.txt
           
-          echo "All Snyk security PRs processed."
-          echo "Final report:"
-          cat merge_report.md
-          
-          # Create an issue with merge results if any PRs failed
-          if grep -q "❌ Failed" merge_report.md; then
-            echo "Creating issue with merge report for failed security upgrades..."
-            gh issue create --title "⚠️ Snyk Security Upgrades Needing Attention: $(date +%Y-%m-%d)" \
-                          --body-file merge_report.md \
-                          --label "security,needs-attention"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "All PRs processed. Results:"
+          echo "Successful merges: $(wc -l < success_bucket.txt)"
+          echo "Failed merges: $(wc -l < error_bucket.txt)"
 
-      - name: No PRs to merge
-        if: steps.get_prs.outputs.PR_NUMBERS_TO_MERGE == ''
-        run: echo "No PRs met the criteria for merging at this time."
+      - name: Generate Summary Report
+        if: steps.find_prs.outputs.FOUND_PRS == 'true'
+        run: |
+          # Create a comprehensive report
+          cat > snyk_merge_report.md << EOF
+          # Snyk Security Upgrade Merge Report
+          
+          **Date:** $(date)
+          
+          ## Summary
+          
+          - **Total PRs:** $(wc -l < pr_list.txt)
+          - **Successfully Merged:** $(wc -l < success_bucket.txt)
+          - **Failed to Merge:** $(wc -l < error_bucket.txt)
+          
+          EOF
+          
+          # Add success section if any
+          if [ -s success_bucket.txt ]; then
+            cat >> snyk_merge_report.md << EOF
+          
+          ## Successfully Merged PRs
+          
+          | PR # | Status | Security Upgrade | Method |
+          |------|--------|------------------|--------|
+          $(cat success_bucket.txt)
+          
+          EOF
+          fi
+          
+          # Add error section if any
+          if [ -s error_bucket.txt ]; then
+            cat >> snyk_merge_report.md << EOF
+          
+          ## PRs Requiring Attention
+          
+          | PR # | Status | Security Upgrade | Result |
+          |------|--------|------------------|--------|
+          $(cat error_bucket.txt)
+          
+          EOF
+          
+            # Add detailed instructions for each failed PR
+            cat >> snyk_merge_report.md << EOF
+          
+          ## Detailed Error Information
+          
+          The following PRs need manual attention. Each has detailed instructions for resolution.
+          
+          EOF
+            
+            # Read error bucket and add detailed info for each PR
+            while IFS=" | " read -r PR_NUMBER _REST; do
+              if [ -f "temp_files/details_${PR_NUMBER}.md" ]; then
+                cat "temp_files/details_${PR_NUMBER}.md" >> snyk_merge_report.md
+                echo "" >> snyk_merge_report.md
+                echo "---" >> snyk_merge_report.md
+                echo "" >> snyk_merge_report.md
+              fi
+            done < error_bucket.txt
+          fi
+          
+          # Add recommendations
+          cat >> snyk_merge_report.md << EOF
+          
+          ## Recommendations
+          
+          1. **For failed merges**: Follow the manual resolution instructions for each PR.
+          2. **Common conflicts**: Pay attention to package.json and package-lock.json files as they are the most common sources of conflicts in Snyk PRs.
+          3. **Security priority**: These are security upgrades and should be prioritized. Consider merging them as soon as possible.
+          4. **Re-run workflow**: After manually resolving conflicts, re-run this workflow to attempt merging again.
+          
+          EOF
+          
+          # Display the report
+          echo "Generated merge report:"
+          cat snyk_merge_report.md
+
+      - name: Create GitHub Issue for Failed PRs
+        if: steps.find_prs.outputs.FOUND_PRS == 'true' && hashFiles('error_bucket.txt') != ''
+        run: |
+          # Only create an issue if there are failed PRs
+          if [ -s error_bucket.txt ]; then
+            FAILED_COUNT=$(wc -l < error_bucket.txt)
+            echo "Creating GitHub issue for $FAILED_COUNT failed security PRs..."
+            
+            gh issue create \
+              --title "🔒 Snyk Security Upgrades Needing Manual Resolution ($(date +%Y-%m-%d))" \
+              --label "security,needs-attention" \
+              --body-file snyk_merge_report.md
+            
+            echo "Issue created successfully!"
+          else
+            echo "No failed PRs - skipping issue creation"
+          fi
