@@ -1,0 +1,88 @@
+name: Label PRs for Automerge
+
+on:
+  push:
+    branches:
+      - main # Or your default branch where this workflow file resides
+  workflow_dispatch: # Allows manual triggering
+  schedule:
+    - cron: '*/1 * * * *' # Runs daily at 3:00 AM UTC. Adjust as needed.
+
+# Ensures only one instance of this workflow runs at a time for this group.
+# If one is running and another is triggered (e.g. cron + manual), the new one cancels the old.
+concurrency:
+  group: ${{ github.workflow }}-labeler
+  cancel-in-progress: true
+
+permissions:
+  issues: write # To create labels
+  pull-requests: write # To add labels to PRs
+
+jobs:
+  label-prs:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TARGET_LABEL_NAME: "automerge"
+      TARGET_LABEL_COLOR: "0E8A16" # A nice green color, GitHub default for "good first issue"
+      TARGET_LABEL_DESCRIPTION: "Marked for automatic merging by workflow"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        # No need to fetch full history for labeling
+
+      - name: Check if label exists and create if not
+        id: check_or_create_label
+        run: |
+          echo "Checking for label: ${{ env.TARGET_LABEL_NAME }}"
+          if gh label list --json name | jq -e '.[] | select(.name == "${{ env.TARGET_LABEL_NAME }}")'; then
+            echo "Label '${{ env.TARGET_LABEL_NAME }}' already exists."
+          else
+            echo "Label '${{ env.TARGET_LABEL_NAME }}' not found. Creating it..."
+            gh label create "${{ env.TARGET_LABEL_NAME }}" \
+              --color "${{ env.TARGET_LABEL_COLOR }}" \
+              --description "${{ env.TARGET_LABEL_DESCRIPTION }}"
+            echo "Label '${{ env.TARGET_LABEL_NAME }}' created."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get open PR numbers
+        id: get_open_prs
+        run: |
+          echo "Fetching open PR numbers..."
+          # Get PR numbers that are open and not already labeled with TARGET_LABEL_NAME
+          PR_NUMBERS=$(gh pr list \
+            --state open \
+            --json number,labels \
+            --jq '[.[] | select(.labels[]?.name != "${{ env.TARGET_LABEL_NAME }}")] | .[].number' | jq -r '. // empty' | tr '\n' ' ')
+
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "No open PRs found that need labeling."
+            echo "PR_NUMBERS_TO_LABEL=" >> $GITHUB_OUTPUT
+          else
+            echo "PRs to label: $PR_NUMBERS"
+            echo "PR_NUMBERS_TO_LABEL=$PR_NUMBERS" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add label to open PRs
+        if: steps.get_open_prs.outputs.PR_NUMBERS_TO_LABEL != ''
+        run: |
+          echo "Adding label '${{ env.TARGET_LABEL_NAME }}' to PRs: ${{ steps.get_open_prs.outputs.PR_NUMBERS_TO_LABEL }}"
+          for pr_number in ${{ steps.get_open_prs.outputs.PR_NUMBERS_TO_LABEL }}; do
+            echo "Labeling PR #$pr_number..."
+            if gh pr edit "$pr_number" --add-label "${{ env.TARGET_LABEL_NAME }}"; then
+              echo "Successfully labeled PR #$pr_number."
+            else
+              echo "Failed to label PR #$pr_number. It might have been closed or merged."
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: No PRs to label
+        if: steps.get_open_prs.outputs.PR_NUMBERS_TO_LABEL == ''
+        run: echo "All open PRs are either already labeled or there are no open PRs."
