@@ -1,23 +1,19 @@
 name: Label PRs for Automerge
-
 on:
   push:
     branches:
-      - main # Or your default branch where this workflow file resides
+      - master # Or your default branch where this workflow file resides
   workflow_dispatch: # Allows manual triggering
   schedule:
     - cron: '*/1 * * * *' # Runs daily at 3:00 AM UTC. Adjust as needed.
-
 # Ensures only one instance of this workflow runs at a time for this group.
 # If one is running and another is triggered (e.g. cron + manual), the new one cancels the old.
 concurrency:
   group: ${{ github.workflow }}-labeler
   cancel-in-progress: true
-
 permissions:
   issues: write # To create labels
   pull-requests: write # To add labels to PRs
-
 jobs:
   label-prs:
     runs-on: ubuntu-latest
@@ -26,12 +22,10 @@ jobs:
       TARGET_LABEL_NAME: "automerge"
       TARGET_LABEL_COLOR: "0E8A16" # A nice green color, GitHub default for "good first issue"
       TARGET_LABEL_DESCRIPTION: "Marked for automatic merging by workflow"
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         # No need to fetch full history for labeling
-
       - name: Check if label exists and create if not
         id: check_or_create_label
         run: |
@@ -47,7 +41,6 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Get open PR numbers
         id: get_open_prs
         run: |
@@ -56,8 +49,8 @@ jobs:
           PR_NUMBERS=$(gh pr list \
             --state open \
             --json number,labels \
-            --jq '[.[] | select(.labels[]?.name != "${{ env.TARGET_LABEL_NAME }}")] | .[].number' | jq -r '. // empty' | tr '\n' ' ')
-
+            --jq '.[] | select((.labels | length == 0) or ([((.labels // [])[] | .name)] | index("${{ env.TARGET_LABEL_NAME }}") | not)) | .number')
+          
           if [ -z "$PR_NUMBERS" ]; then
             echo "No open PRs found that need labeling."
             echo "PR_NUMBERS_TO_LABEL=" >> $GITHUB_OUTPUT
@@ -67,7 +60,6 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Add label to open PRs
         if: steps.get_open_prs.outputs.PR_NUMBERS_TO_LABEL != ''
         run: |
@@ -82,7 +74,6 @@ jobs:
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: No PRs to label
         if: steps.get_open_prs.outputs.PR_NUMBERS_TO_LABEL == ''
         run: echo "All open PRs are either already labeled or there are no open PRs."
