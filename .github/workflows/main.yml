@@ -143,6 +143,12 @@ jobs:
               ;;
           esac
           
+          # Create a file to track merged and failed PRs
+          echo "# Automerge Report $(date)" > merge_report.md
+          echo "" >> merge_report.md
+          echo "| PR # | Status | Title | Reason |" >> merge_report.md
+          echo "|------|--------|-------|--------|" >> merge_report.md
+          
           for pr_number in ${{ steps.get_prs.outputs.PR_NUMBERS_TO_MERGE }}; do
             echo "Attempting to merge PR #$pr_number with method: ${{ env.MERGE_METHOD }}"
             
@@ -158,52 +164,85 @@ jobs:
             echo "Processing: #$pr_number - $TITLE ($HEAD_BRANCH)"
             echo "URL: $PR_URL"
             
-            # For Snyk PRs, we want to be aggressive about merging security fixes
-            # First try with admin flag
-            echo "Trying to merge with --admin flag..."
+            # First attempt: Try with current merge method
+            echo "1️⃣ First attempt: Trying to merge with ${{ env.MERGE_METHOD }} method and admin flag..."
             if gh pr merge $pr_number $MERGE_ARGS --admin; then
-              echo "✅ Successfully merged Snyk PR #$pr_number with admin flag"
-              # Wait to allow CI to catch up
-              echo "Waiting 10 seconds before processing the next PR..."
-              sleep 10
+              echo "✅ Successfully merged PR #$pr_number with ${{ env.MERGE_METHOD }} method"
+              echo "| $pr_number | ✅ Success | $TITLE | Merged with ${{ env.MERGE_METHOD }} method |" >> merge_report.md
+              sleep 5
               continue
             fi
             
-            # If that fails, try adding the required label (if not already present)
+            # Second attempt: Try with auto flag for simple conflicts
+            echo "2️⃣ Second attempt: Trying with --auto flag for automatic conflict resolution..."
+            if gh pr merge $pr_number $MERGE_ARGS --admin --auto; then
+              echo "✅ Successfully merged PR #$pr_number with auto conflict resolution"
+              echo "| $pr_number | ✅ Success | $TITLE | Auto-resolved conflicts |" >> merge_report.md
+              sleep 5
+              continue
+            fi
+            
+            # Third attempt: If there's a required label, make sure it's added
             if [ -n "${{ env.REQUIRED_LABEL }}" ]; then
-              echo "Adding label: ${{ env.REQUIRED_LABEL }}"
+              echo "3️⃣ Third attempt: Adding label ${{ env.REQUIRED_LABEL }} and trying again..."
               gh pr edit $pr_number --add-label "${{ env.REQUIRED_LABEL }}"
-              
-              # Try to merge again after adding the label
-              echo "Retrying merge after adding label..."
-              if gh pr merge $pr_number $MERGE_ARGS --admin; then
-                echo "✅ Successfully merged Snyk PR #$pr_number after adding label"
-                sleep 10
+              if gh pr merge $pr_number $MERGE_ARGS --admin --auto; then
+                echo "✅ Successfully merged PR #$pr_number after adding label"
+                echo "| $pr_number | ✅ Success | $TITLE | Added label and auto-resolved |" >> merge_report.md
+                sleep 5
                 continue
               fi
             fi
             
-            # If those approaches fail, try forcing the merge (for Snyk security PRs)
-            echo "Attempting to force merge by dismissing reviews and checks..."
-            
-            # Try to enable auto-merge feature if available (GitHub Enterprise feature)
-            echo "Enabling auto-merge if available..."
-            gh pr edit $pr_number --add-label "security-fix"
-            
-            # Final attempt with different merge method
-            echo "Final attempt with merge commit method..."
-            if gh pr merge $pr_number --merge --admin; then
-              echo "✅ Successfully merged Snyk PR #$pr_number with merge commit method"
-            else
-              echo "❌ Failed to merge Snyk PR #$pr_number after multiple attempts."
-              # You might want to notify someone at this point
+            # Fourth attempt: Try merge commit method as fallback
+            if [ "${{ env.MERGE_METHOD }}" != "MERGE" ]; then
+              echo "4️⃣ Fourth attempt: Falling back to merge commit method..."
+              if gh pr merge $pr_number --merge --admin --auto; then
+                echo "✅ Successfully merged PR #$pr_number with merge commit method"
+                echo "| $pr_number | ✅ Success | $TITLE | Used merge commit method |" >> merge_report.md
+                sleep 5
+                continue
+              fi
             fi
             
+            # Final fallback: For very important security fixes, try force merge
+            if [[ "$TITLE" == *"Security upgrade"* ]] || [[ "$TITLE" == *"security fix"* ]] || [[ "$TITLE" == *"vulnerability"* ]]; then
+              echo "5️⃣ Final attempt: Adding security-fix label and trying one last time..."
+              gh pr edit $pr_number --add-label "security-fix"
+              if gh pr merge $pr_number --merge --admin --auto; then
+                echo "✅ Successfully merged security fix PR #$pr_number with final attempt"
+                echo "| $pr_number | ✅ Success | $TITLE | Force merged security fix |" >> merge_report.md
+                sleep 5
+                continue
+              fi
+            fi
+            
+            # If we got here, all merge attempts failed
+            echo "❌ Failed to merge PR #$pr_number after multiple attempts."
+            echo "| $pr_number | ❌ Failed | $TITLE | Could not resolve conflicts automatically |" >> merge_report.md
+            
+            # Record the merge failure reason
+            ERROR_OUTPUT=$(gh pr merge $pr_number $MERGE_ARGS --admin 2>&1 || true)
+            echo "Error: $ERROR_OUTPUT" >> merge_report.md
+            echo "" >> merge_report.md
+            echo "To resolve manually:" >> merge_report.md
+            echo "\`\`\`" >> merge_report.md
+            echo "gh pr checkout $pr_number && git fetch origin ${{ env.BASE_BRANCH_EFFECTIVE }} && git merge origin/${{ env.BASE_BRANCH_EFFECTIVE }}" >> merge_report.md
+            echo "\`\`\`" >> merge_report.md
+            
             # Wait between PRs
-            echo "Waiting 10 seconds before processing the next PR..."
-            sleep 10
+            echo "Waiting 5 seconds before processing the next PR..."
+            sleep 5
           done
-          echo "All queued PRs processed."
+          
+          echo "All queued PRs processed. Final report:"
+          cat merge_report.md
+          
+          # Optional: Create an issue with the merge report
+          if grep -q "Failed" merge_report.md; then
+            echo "Creating issue with merge report for failed PRs..."
+            gh issue create --title "Automerger Report: $(date +%Y-%m-%d)" --body-file merge_report.md --label "automerge-report"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
