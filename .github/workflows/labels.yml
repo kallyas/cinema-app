@@ -5,7 +5,7 @@ on:
       - master # Or your default branch where this workflow file resides
   workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '*/1 * * * *' # Runs daily at 3:00 AM UTC. Adjust as needed.
+    - cron: '0 3 * * *' # Runs daily at 3:00 AM UTC. Adjust as needed.
 # Ensures only one instance of this workflow runs at a time for this group.
 # If one is running and another is triggered (e.g. cron + manual), the new one cancels the old.
 concurrency:
@@ -49,14 +49,15 @@ jobs:
           PR_NUMBERS=$(gh pr list \
             --state open \
             --json number,labels \
-            --jq '.[] | select((.labels | length == 0) or ([((.labels // [])[] | .name)] | index("${{ env.TARGET_LABEL_NAME }}") | not)) | .number')
+            --jq '.[] | select((.labels | length == 0) or ([((.labels // [])[] | .name)] | index("${{ env.TARGET_LABEL_NAME }}") | not)) | .number' | tr '\n' ' ')
           
           if [ -z "$PR_NUMBERS" ]; then
             echo "No open PRs found that need labeling."
             echo "PR_NUMBERS_TO_LABEL=" >> $GITHUB_OUTPUT
           else
             echo "PRs to label: $PR_NUMBERS"
-            echo "PR_NUMBERS_TO_LABEL=$PR_NUMBERS" >> $GITHUB_OUTPUT
+            # Format the output properly for GitHub Actions
+            echo "PR_NUMBERS_TO_LABEL=${PR_NUMBERS}" >> $GITHUB_OUTPUT
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
