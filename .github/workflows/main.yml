@@ -3,7 +3,7 @@ name: Resilient Snyk PR Automerger
 on:
   workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '*/15 * * * *' # Runs every 15 minutes
+    - cron: '1  5 * 6 *' # Runs every 15 minutes
 
 # Ensures only one instance runs at a time
 concurrency:
