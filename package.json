@@ -47,9 +47,6 @@
   "devDependencies": {
     "nodemon": "^3.1.10"
   },
-  "engines": {
-    "node": "^22.15.0"
-  },
   "eslintConfig": {
     "extends": "react-app"
   },
