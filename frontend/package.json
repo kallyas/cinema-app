@@ -5,7 +5,7 @@
   "dependencies": {
     "@hapi/joi": "^15.0.0",
     "axios": "^1.8.3",
-    "bcrypt": "^5.0.0",
+    "bcrypt": "^6.0.0",
     "bootstrap": "^5.3.5",
     "font-awesome": "^4.7.0",
     "lodash": "^4.17.21",
