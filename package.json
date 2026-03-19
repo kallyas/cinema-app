@@ -11,9 +11,6 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@testing-library/jest-dom": "^4.2.4",
-    "@testing-library/react": "^14.0.0",
-    "@testing-library/user-event": "^7.1.2",
     "bcrypt": "^6.0.0",
     "body-parser": "^1.19.0",
     "concurrently": "^3.6.1",
@@ -27,9 +24,6 @@
     "nodemailer": "^7.0.7",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
-    "react": "^16.14.0",
-    "react-dom": "^16.14.0",
-    "react-scripts": "^5.0.0",
     "redis": "^3.1.2",
     "validator": "^13.7.0",
     "webpack-sources": "^1.4.3"
@@ -39,27 +33,12 @@
     "dev": "concurrently \"npm run server\" \"npm run frontend\"",
     "start": "node server.js",
     "server": "nodemon server.js",
-    "frontend": "cd ./frontend && npm start",
+    "frontend": "cd ./frontend && npm run dev",
     "setup-frontend": "cd frontend && npm install",
     "build-frontend": "npm run setup-frontend && cd frontend && npm run build",
     "heroku-postbuild": "NPM_CONFIG_PRODUCTION=false npm run build-frontend"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
-  },
-  "eslintConfig": {
-    "extends": "react-app"
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
   }
 }

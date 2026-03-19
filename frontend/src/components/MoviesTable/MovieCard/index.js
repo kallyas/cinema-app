@@ -1,7 +1,7 @@
 import React from "react";
-
 import FlippingCardFront from "./CardFront";
 import FlippingCardBack from "./CardBack";
+import { bytesToBase64Image } from "../../../utils/image";
 import "./style.css";
 
 export default function ({ movie }) {
@@ -16,8 +16,7 @@ export default function ({ movie }) {
     movieLength,
   } = movie;
 
-  const encodedImage = new Buffer(image.data, "binary").toString("base64");
-  const coverImage = "data:image/jpeg;base64," + encodedImage;
+  const coverImage = bytesToBase64Image(image);
 
   function flipCard(cardID) {
     const card = document.getElementById(`${cardID}`);
@@ -41,4 +40,3 @@ export default function ({ movie }) {
     </div>
   );
 }
-

@@ -1,142 +1,104 @@
-import React, { Component } from "react";
-import { connect } from "react-redux";
+import React from "react";
 import _ from "lodash";
+import { useQuery } from "@tanstack/react-query";
 
 import { search, categorize, filterRating } from "../../utils";
 import { MoviesTable, Pagination } from "../../components";
 import { Input, Loading, ListGroup } from "../../components/common";
+import { getMovies } from "../../api/movies";
+import { getGenres } from "../../api/genres";
+import useMovieFiltersStore from "../../store/useMovieFiltersStore";
 
-import { getMovies } from "../../actions/moviesAction";
-import { getGenres } from "../../actions/genreAction";
+function Movies() {
+  const pageSize = 12;
+  const currentPage = useMovieFiltersStore((state) => state.currentPage);
+  const currentGenre = useMovieFiltersStore((state) => state.currentGenre);
+  const searchFilter = useMovieFiltersStore((state) => state.searchFilter);
+  const rating = useMovieFiltersStore((state) => state.rating);
+  const setCurrentPage = useMovieFiltersStore((state) => state.setCurrentPage);
+  const setCurrentGenre = useMovieFiltersStore((state) => state.setCurrentGenre);
+  const setSearchFilter = useMovieFiltersStore((state) => state.setSearchFilter);
+  const setRating = useMovieFiltersStore((state) => state.setRating);
+  const { data: movies = [], isLoading: moviesLoading } = useQuery({
+    queryKey: ["movies"],
+    queryFn: getMovies,
+  });
+  const { data: genres = [], isLoading: genresLoading } = useQuery({
+    queryKey: ["genres"],
+    queryFn: getGenres,
+  });
 
-class Movies extends Component {
-  state = {
-    genres: [],
-    pageSize: 12,
-    currentPage: 1,
-    currentGenre: "All",
-    searchFilter: "",
-    rating: 0,
-  };
-
-  componentDidMount() {
-    this.props.getMovies();
-    this.props.getGenres();
-  }
-
-  handleChange = (name, value) => {
-    this.setState({ [name]: value, currentPage: 1 });
-  };
-
-  onPageChange = (page) => {
-    this.setState({ currentPage: page });
-  };
-
-  render() {
-    const {
-      currentGenre,
-      currentPage,
-      searchFilter,
-      pageSize,
-      rating,
-    } = this.state;
-
-    const { movies, genres, loggedIn } = this.props;
-
-    if (_.isEmpty(movies)) {
-      return (
-        <div className="background-container pt-5">
-          <Loading />
-        </div>
-      );
-    }
-
-    let filteredMovies = [];
-
-    /* Checking for searched item if nothing searched it will just set it to allMovies*/
-    filteredMovies = search(movies, searchFilter, "title");
-    filteredMovies = categorize(filteredMovies, currentGenre);
-    filteredMovies = filterRating(filteredMovies, rating);
-
+  if (moviesLoading || genresLoading) {
     return (
-      <div className="background-container">
-        <div className="mx-5 py-5">
-          <div className="row">
-            <div className="col-lg-2 col-sm-12">
-              <h4 className="text-muted text-left p-1">Filters</h4>
-              <ListGroup
-                active={currentGenre}
-                onChange={(val) => this.handleChange("currentGenre", val)}
-                options={genres}
-              />
-
-              <Input
-                onChange={(val) =>
-                  this.handleChange("rating", val.target.value)
-                }
-                label={"Rating"}
-                min={0}
-                max={10}
-                placeholder="0-10"
-                type="number"
-                iconClass="fas fa-star"
-              />
-              {/* { loggedIn && <Link to='/movies/new' className='btn btn-primary btn-block my-2 text-white'> Add Movie </Link> } */}
-              {/* <Rating total={5} filled={rating} onChange={val => this.handleChange('rating', val)}/> */}
-            </div>
-
-            <div className="col-lg-10 col-sm-12">
-              <Input
-                onChange={(event) =>
-                  this.handleChange("searchFilter", event.target.value)
-                }
-                label="Search Movie"
-                iconClass="fas fa-search"
-                placeholder="Search..."
-              />
-              <p className="text-left text-muted">
-                {!!filteredMovies.length ? `${filteredMovies.length}` : "0"}
-                movies found.
-              </p>
-
-              {!!filteredMovies ? (
-                <MoviesTable
-                  pageSize={pageSize}
-                  currentPage={currentPage}
-                  movies={filteredMovies}
-                />
-              ) : (
-                <h1 className="text-white">No Movies</h1>
-              )}
-              <br />
-
-              <Pagination
-                itemsCount={filteredMovies.length}
-                pageSize={pageSize}
-                onPageChange={this.onPageChange}
-                currentPage={currentPage}
-              />
-            </div>
-          </div>
-        </div>
+      <div className="background-container pt-5">
+        <Loading />
       </div>
     );
   }
+
+  let filteredMovies = search(movies, searchFilter, "title");
+  filteredMovies = categorize(filteredMovies, currentGenre);
+  filteredMovies = filterRating(filteredMovies, rating);
+
+  return (
+    <div className="background-container">
+      <div className="mx-5 py-5">
+        <div className="row">
+          <div className="col-lg-2 col-sm-12">
+            <h4 className="text-muted text-left p-1">Filters</h4>
+            <ListGroup
+              active={currentGenre}
+              onChange={setCurrentGenre}
+              options={genres}
+            />
+
+            <Input
+              onChange={(event) => setRating(Number(event.target.value) || 0)}
+              label="Rating"
+              min={0}
+              max={10}
+              placeholder="0-10"
+              type="number"
+              iconClass="fas fa-star"
+              value={rating}
+            />
+          </div>
+
+          <div className="col-lg-10 col-sm-12">
+            <Input
+              onChange={(event) => setSearchFilter(event.target.value)}
+              label="Search Movie"
+              iconClass="fas fa-search"
+              placeholder="Search..."
+              value={searchFilter}
+            />
+            <p className="text-left text-muted">
+              {!!filteredMovies.length ? `${filteredMovies.length}` : "0"}
+              movies found.
+            </p>
+
+            {!_.isEmpty(filteredMovies) ? (
+              <MoviesTable
+                pageSize={pageSize}
+                currentPage={currentPage}
+                movies={filteredMovies}
+              />
+            ) : (
+              <h1 className="text-white">No Movies</h1>
+            )}
+            <br />
+
+            <Pagination
+              itemsCount={filteredMovies.length}
+              pageSize={pageSize}
+              onPageChange={setCurrentPage}
+              currentPage={currentPage}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-const mapStateToProps = (state) => {
-  return {
-    movies: state.movie.movies,
-    genres: state.genre.genres,
-    loggedIn: state.auth.loggedIn,
-  };
-};
-
-const mapDispatchToProps = (dispatch) => {
-  return {
-    getMovies: () => dispatch(getMovies()),
-    getGenres: () => dispatch(getGenres()),
-  };
-};
-
-export default connect(mapStateToProps, mapDispatchToProps)(Movies);
+export default Movies;

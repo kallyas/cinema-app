@@ -1,10 +1,12 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { connect } from "react-redux";
-import { signOut } from "../../actions/authAction";
+import useAuthStore from "../../store/useAuthStore";
 import "./style.css";
 
-function Navbar(props) {
+function Navbar() {
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const signOut = useAuthStore((state) => state.signOut);
+
   function toggleNav() {
     animateSlider();
     const burgerButton = document.getElementById("burger");
@@ -28,24 +30,22 @@ function Navbar(props) {
 
   return (
     <nav className="nav-wrapper">
-      <div id="burger" class="ico-btn" onClick={toggleNav}>
-        <span class="ico-btn__burger"></span>
+      <div id="burger" className="ico-btn" onClick={toggleNav}>
+        <span className="ico-btn__burger"></span>
       </div>
-
-      {/* <Link className="nav-brand" to="/">iCinema</Link> */}
 
       <div id="slider" className="slider">
         <ul className="list">
           <Link onClick={toggleNav} to="/movies">
             Home
           </Link>
-          {!props.loggedIn ? (
+          {!isAuthenticated ? (
             <>
               <Link onClick={toggleNav} to="/login">
                 Login
               </Link>
 
-              <Link onClick={toggleNav} to="/resigter">
+              <Link onClick={toggleNav} to="/register">
                 Register
               </Link>
             </>
@@ -53,9 +53,9 @@ function Navbar(props) {
             <Link
               onClick={() => {
                 toggleNav();
-                props.signOut();
+                signOut();
               }}
-              to="/#"
+              to="/movies"
             >
               Log out
             </Link>
@@ -66,16 +66,4 @@ function Navbar(props) {
   );
 }
 
-const mapStateToProps = (state) => {
-  return {
-    loggedIn: state.auth.loggedIn,
-  };
-};
-
-const mapDispatchToProps = (dispatch) => {
-  return {
-    signOut: () => dispatch(signOut()),
-  };
-};
-
-export default connect(mapStateToProps, mapDispatchToProps)(Navbar);
+export default Navbar;

@@ -1,125 +1,143 @@
 import React from "react";
-import Joi from "@hapi/joi";
-import { connect } from "react-redux";
-
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+import { zodResolver } from "@hookform/resolvers/zod";
 import Input from "../../components/common/Input";
 import Select from "../../components/common/Select";
-import { addMovie } from "../../actions/moviesAction";
-import { movieSchema } from "./schema";
+import Button from "../../components/common/Button";
+import { addMovie } from "../../api/movies";
+import { getGenres } from "../../api/genres";
+import { getErrorMessage } from "../../lib/api";
 
-class AddMovieForm extends React.Component {
-  state = {
-    data: {
+const addMovieSchema = z.object({
+  title: z.string().min(1, "Title is required."),
+  genre: z.string().min(1, "Genre is required."),
+  numberInStock: z.coerce.number().min(0, "Number in stock must be at least 0."),
+  description: z.string().min(1, "Description is required."),
+  image: z
+    .any()
+    .refine((files) => files?.length === 1, "Cover image is required."),
+});
+
+function AddMovieForm() {
+  const queryClient = useQueryClient();
+  const {
+    data: genres = [],
+    isLoading,
+  } = useQuery({
+    queryKey: ["genres"],
+    queryFn: getGenres,
+  });
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+    reset,
+  } = useForm({
+    resolver: zodResolver(addMovieSchema),
+    defaultValues: {
       title: "",
       genre: "",
-      numberInStock: "",
+      numberInStock: 0,
       description: "",
-      image: null,
+      image: undefined,
     },
-    genres: [],
-    errors: {},
-  };
+  });
 
-  handleChange = ({ currentTarget: input }) => {
-    const data = { ...this.state.data };
-    data[input.name] = input.value;
-    this.setState({ data });
-  };
+  const addMovieMutation = useMutation({
+    mutationFn: addMovie,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["movies"] });
+      reset();
+    },
+  });
 
-  handleSubmit = (e) => {
-    e.preventDefault();
-    //TODO: Validate property
-    const { error } = Joi.validate(this.state, movieSchema);
-    this.setState({ errors: error });
-    if (!error) this.props.addMovie(this.state.data);
-  };
-
-  uploadImage = (e) => {
-    if (e.target.files[0]) {
-      const data = { ...this.state.data };
-      data.image = e.target.files[0];
-      this.setState({ data });
-    }
-  };
-
-  render() {
-    const { errors, data } = this.state;
-    const { title, genre, numberInStock } = data;
-    const { genres } = this.props;
-
+  if (isLoading) {
     return (
       <div className="background-container pt-5">
-        <div className="container">
-          <h1 className="header">Add a new movie</h1>
-
-          <form onSubmit={this.handleSubmit} encType="multipart/form-data">
-            <Input
-              name="title"
-              value={title}
-              label="Title"
-              onChange={this.handleChange}
-              placeholder="Enter the title..."
-              error={errors["title"]}
-              iconClass="fas fa-film"
-              autoFocus
-            />
-
-            <Select
-              name="genre"
-              label="Genre"
-              onChange={this.handleChange}
-              value={genre}
-              error={errors["genre"]}
-              options={genres}
-              iconClass="fas fa-address-card"
-            />
-
-            <Input
-              name="numberInStock"
-              label="Number In Stock"
-              onChange={this.handleChange}
-              placeholder="Enter numbers the stock..."
-              error={errors["numberInStock"]}
-              iconClass="fas fa-hashtag"
-              value={numberInStock}
-              type="number"
-            />
-
-            <Input
-              name="image"
-              label="Cover Image"
-              onChange={this.uploadImage}
-              error={errors["coverImage"]}
-              iconClass="fas fa-file-image"
-              accept="image/*"
-              type="file"
-            />
-
-            <Input
-              name="description"
-              label="Description"
-              placeholder="Enter description about this movie..."
-              iconClass="fas fa-info"
-              error={errors["description"]}
-              type="textarea"
-            />
-          </form>
-        </div>
+        <div className="container text-white">Loading genres...</div>
       </div>
     );
   }
+
+  return (
+    <div className="background-container pt-5">
+      <div className="container">
+        <h1 className="header">Add a new movie</h1>
+
+        <form
+          onSubmit={handleSubmit((values) => addMovieMutation.mutateAsync(values))}
+          encType="multipart/form-data"
+        >
+          <Input
+            name="title"
+            label="Title"
+            placeholder="Enter the title..."
+            error={errors.title?.message}
+            iconClass="fas fa-film"
+            autoFocus
+            {...register("title")}
+          />
+
+          <Select
+            name="genre"
+            label="Genre"
+            error={errors.genre?.message}
+            options={genres}
+            iconClass="fas fa-address-card"
+            {...register("genre")}
+          />
+
+          <Input
+            name="numberInStock"
+            label="Number In Stock"
+            placeholder="Enter numbers the stock..."
+            error={errors.numberInStock?.message}
+            iconClass="fas fa-hashtag"
+            type="number"
+            {...register("numberInStock", { valueAsNumber: true })}
+          />
+
+          <Input
+            name="image"
+            label="Cover Image"
+            error={errors.image?.message}
+            iconClass="fas fa-file-image"
+            accept="image/*"
+            type="file"
+            {...register("image")}
+          />
+
+          <Input
+            name="description"
+            label="Description"
+            placeholder="Enter description about this movie..."
+            iconClass="fas fa-info"
+            error={errors.description?.message}
+            type="textarea"
+            {...register("description")}
+          />
+
+          {addMovieMutation.isError && (
+            <p className="bg-info text-white">
+              {getErrorMessage(addMovieMutation.error, "Unable to add movie.")}
+            </p>
+          )}
+
+          {addMovieMutation.isSuccess && (
+            <p className="bg-info text-white">Movie added successfully.</p>
+          )}
+
+          <Button
+            type="submit"
+            label="Add Movie"
+            disabled={isSubmitting || addMovieMutation.isPending}
+          />
+        </form>
+      </div>
+    </div>
+  );
 }
-const mapDispatchToProps = (dipatch) => {
-  return {
-    addMovie: (movie) => dipatch(addMovie(movie)),
-  };
-};
 
-const mapStateToProps = (state) => {
-  return {
-    genres: state.genre.genres,
-  };
-};
-
-export default connect(mapStateToProps, mapDispatchToProps)(AddMovieForm);
-
+export default AddMovieForm;
